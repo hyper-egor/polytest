@@ -1,0 +1,97 @@
+buildscript {
+    ext {
+        springBootVersion = '3.2.0'
+        springAiVersion = "1.0.0"
+    }
+    repositories {
+        mavenCentral()
+        flatDir {
+            dirs 'libs'
+        }
+    }
+
+    dependencies {
+        classpath("org.springframework.boot:spring-boot-gradle-plugin:${springBootVersion}")
+    }
+}
+
+apply plugin: 'java'
+apply plugin: 'idea'
+apply plugin: 'io.spring.dependency-management'
+apply plugin: 'org.springframework.boot'
+apply plugin: 'io.spring.dependency-management' //id '' version '1.1.7'
+
+
+group = 'ru.polytest'
+version = '0.0.1-SNAPSHOT'
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+    maven { url "https://repository.jboss.org/nexus/content/repositories/releases" }
+    //codehaus { url "http://repository.codehaus.org/org/codehaus" }
+    flatDir {
+        dirs 'libs'
+    }
+}
+
+
+dependencies {
+
+    implementation 'jakarta.servlet:jakarta.servlet-api:6.0.0'
+    implementation 'jakarta.annotation:jakarta.annotation-api:2.1.1'
+
+    implementation 'org.springframework:spring-core'
+
+    implementation 'org.jfree:jfreechart:1.5.3'
+    implementation 'org.java-websocket:Java-WebSocket:1.5.7'
+
+
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-thymeleaf'
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+
+
+    implementation 'org.jetbrains:annotations:13.0'
+    implementation 'org.reactivestreams:reactive-streams:1.0.3'
+    implementation 'com.squareup.okhttp3:okhttp:4.9.1'
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.3.70'
+
+    implementation 'org.apache.lucene:lucene-queryparser:4.10.4'
+    implementation 'org.apache.lucene:lucene-highlighter:4.10.4'
+
+    // json
+    implementation 'io.gsonfire:gson-fire:1.3.1'
+    implementation 'org.json:json:20140107'
+
+    // jackson
+    implementation 'org.codehaus.jackson:jackson-mapper-asl:1.9.13'
+
+    // https://mvnrepository.com/artifact/javax.xml.bind/jaxb-api
+    implementation 'javax.xml.bind:jaxb-api:2.3.1'
+
+    // https://mvnrepository.com/artifact/com.alibaba/fastjson
+    implementation 'com.alibaba:fastjson:2.0.52'
+
+}
+
+
+clean {
+    delete 'bin'
+    delete 'target'
+    delete '.settings'
+    delete '.project'
+    delete '.classpath'
+}
+
+bootRun {
+    jvmArgs = [
+            "-Dfile.encoding=UTF-8",
+            "-Djava.net.preferIPv4Stack=true",
+            "-Xmx26200m"
+    ]
+}
