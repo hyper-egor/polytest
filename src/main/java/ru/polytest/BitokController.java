@@ -21,7 +21,9 @@ public class BitokController {
     
     private static final Logger log = LoggerFactory.getLogger(BitokController.class);
     
-   
+   @Autowired
+   StakanService stakanService;
+
     @RequestMapping(value = "/x", method = RequestMethod.GET)
     public String root()
     {

@@ -1,4 +1,4 @@
-package ru.bitok;
+package ru.polytest;
 
 import org.java_websocket.handshake.ServerHandshake;
 

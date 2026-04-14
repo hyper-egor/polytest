@@ -1,42 +1,48 @@
 package ru.polytest;
 
-import com.google.gson.JsonParser;
+import com.google.gson.Gson;
 import org.java_websocket.handshake.ServerHandshake;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 
 @Component
 public class PolyHandler implements BinanceUniHandler {
-    private static final Logger log = LoggerFactory.getLogger(BinanceFutHandler.class);
+    private static final Logger log = LoggerFactory.getLogger(PolyHandler.class);
+    private static final Gson GSON = new Gson();
 
-    @Autowired
-    StakanService stakanService;
+    private final Set<String> subscriptions = new HashSet<>();
 
-
-    private Set<String> subscriptions = new HashSet<>();
-    
-    @Autowired
-    BinanceService binanceConnector;
-    
-    private String listenKey = null;
-    private long keyUpdateTime = 0;
-
-    JsonParser parser = new JsonParser();
-    
     BinanceSocketer socketer = null;
 
-    //@PostConstruct
-    public void init()
+    /** Запускает websocket-подключение к Polymarket. */
+    public synchronized void init()
     {
+        if (socketer != null && !socketer.isClosed()) {
+            log.info("Socket already created, skip duplicated init.");
+            return;
+        }
         createSocket();
+    }
+
+    /** Сохраняет набор токенов, на которые нужно оформить подписку после подключения. */
+    public synchronized void setSubscriptions(Set<String> tokenIds)
+    {
+        subscriptions.clear();
+        if (tokenIds == null || tokenIds.isEmpty()) {
+            log.info("No token ids for subscription.");
+            return;
+        }
+        subscriptions.addAll(tokenIds);
+        log.info("Prepared {} token ids for websocket subscription.", subscriptions.size());
     }
 
     long RETRY_SLEEP_INTERVAL = 2000L;
@@ -44,36 +50,20 @@ public class PolyHandler implements BinanceUniHandler {
     ///
     private void createSocket()
     {
-        log.info("Trying to create BinanceSocketer for Futures...");
+        log.info("Trying to create Socketer...");
         try {
             int tryCnt = 0;
             while (true)
             {
                 tryCnt ++;
                 try {
-                    String streams = "";
-                    
-                    for (int i=0; i < instruments.size(); i++)
-                    {
-                        String symbol = instruments.get(i).toLowerCase();
-                        if (streams.length() > 0) streams = streams + "/";
-                        streams = streams +
-                            symbol + "@depth5@100ms";
-                                //symbol + "@kline_1m/" +
-                            // symbol + "@trade";
-                    }
-                    listenKey = binanceConnector.getListenKey( true );
-                    if (listenKey == null) throw new Exception("Couldn't recv listenKey");
-                    
-                    String _url = (!StakanService.DEMO ? "wss://fstream.binance.com/" : "wss://stream.binancefuture.com/")
-                            + "stream?streams=" + streams + "/" + listenKey;
+                    String _url = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
                     
                     log.info("URL = " + _url);
                     
                     socketer = new BinanceSocketer( new URI( _url ) );
                     socketer.setHandler( this );
                     socketer.connect();
-                    keyUpdateTime = System.currentTimeMillis();
                     break;
                 } catch (Throwable e)
                 {
@@ -105,21 +95,6 @@ public class PolyHandler implements BinanceUniHandler {
         }
     }
 
-    @Scheduled(fixedDelay = 300_000L)       // раз в 5 минут
-    private void checkKeyValidity()
-    {
-        if (listenKey != null)
-        {
-            if (System.currentTimeMillis() - keyUpdateTime > 3000_000) // Если прошло более 50 минут - обновим
-            {
-                log.info("refreshing listen key");
-                binanceConnector.keepAliveListenKey(true, listenKey);
-                keyUpdateTime = System.currentTimeMillis();
-            }
-        }
-    }
-
-    /**  */
     public PolyHandler()
     {
     }
@@ -130,13 +105,19 @@ public class PolyHandler implements BinanceUniHandler {
     public void onOpen( ServerHandshake handshakedata )
     {
         opened = true;
-        log.info( "Binance fut Connected.");
-        for (String s : subscriptions)
-        {
-            log.info( "Subscription : " + s);
-            log.error(" =================== BINANCE FUTURES EXTRA SUBSCRIPTIONS NOT MADE ======================= TODO:.....");
-            // this.send("{\"op\": \"subscribe\", \"args\": \"" + s + "\"}");
+        log.info( "Poly websocket connected.");
+
+        if (subscriptions.isEmpty()) {
+            log.info("No prepared subscriptions for Polymarket websocket.");
+            return;
         }
+
+        List<String> assetIds = new ArrayList<>(subscriptions);
+        MarketSubscriptionRequest request = new MarketSubscriptionRequest(assetIds, "market");
+        String payload = GSON.toJson(request);
+
+        log.info("Sending subscription for {} tokens.", assetIds.size());
+        socketer.send(payload);
     }
 
   //  @Scheduled(fixedDelay = 3000L)
@@ -147,22 +128,15 @@ public class PolyHandler implements BinanceUniHandler {
         log.info("hart beated F");
     }
 
-    long lastDebugTime = System.currentTimeMillis();
-
     @Override
     public void onMessage( String message )
     {
-        if (System.currentTimeMillis() - lastDebugTime > 2000) {
-           // log.info("==== Binance Fut update : " + message);
-            lastDebugTime = System.currentTimeMillis();
-        }
+
         try {
             if (message.indexOf("@depth") >= 0)
             { // Прилетело обновление стакана
                 try {
-                  //  log.info("UPDATE" + message);
-                    BstakanUpdate update = new BstakanUpdate( parser, message , true);
-                    stakanService.updateBinanceStakan( update, true );
+                    // do smthng
                 } catch (Exception e)
                 {
                     log.error("Couldn't parse " + message, e);
@@ -170,8 +144,7 @@ public class PolyHandler implements BinanceUniHandler {
             } else if (message.indexOf("@kline_") >= 0)
             {
                 try {
-                    StreamCandle candle = new StreamCandle(parser, message);                    
-                    stakanService.updateBinanceCandles( candle, true );
+                    // do smthng
                     //log.info( message );
                 } catch (Exception e)
                 {
@@ -190,7 +163,9 @@ public class PolyHandler implements BinanceUniHandler {
     public void onClose( int code, String reason, boolean remote )
     {
         log.info( "!!!!!!!!!!!! =========== Disconnected " + code + reason + remote);
-        stakanService.clearBinanceStakan( true );
+        // TODO: сообщить сервису что прошлоотключение
+        opened = false;
+        socketer = null;
         needReconnect = true;
         // createSocket();
     }
@@ -199,6 +174,19 @@ public class PolyHandler implements BinanceUniHandler {
     public void onError( Exception ex )
     {
         log.error( "Yo-ho-ho", ex );
+    }
+
+    /** DTO для сообщения подписки на market channel в Polymarket. */
+    private static class MarketSubscriptionRequest
+    {
+        private final List<String> assets_ids;
+        private final String type;
+
+        private MarketSubscriptionRequest(List<String> assetsIds, String type)
+        {
+            this.assets_ids = assetsIds;
+            this.type = type;
+        }
     }
 
 }
