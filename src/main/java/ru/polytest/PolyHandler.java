@@ -1,6 +1,11 @@
 package ru.polytest;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonSyntaxException;
 import org.java_websocket.handshake.ServerHandshake;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +25,7 @@ public class PolyHandler implements BinanceUniHandler {
     private static final Gson GSON = new Gson();
 
     private final Set<String> subscriptions = new HashSet<>();
+    private StakanService stakanService;
 
     BinanceSocketer socketer = null;
 
@@ -43,6 +49,12 @@ public class PolyHandler implements BinanceUniHandler {
         }
         subscriptions.addAll(tokenIds);
         log.info("Prepared {} token ids for websocket subscription.", subscriptions.size());
+    }
+
+    /** Регистрирует сервис, который будет принимать распарсенные market-data события. */
+    public synchronized void setStakanService(StakanService stakanService)
+    {
+        this.stakanService = stakanService;
     }
 
     long RETRY_SLEEP_INTERVAL = 2000L;
@@ -113,7 +125,7 @@ public class PolyHandler implements BinanceUniHandler {
         }
 
         List<String> assetIds = new ArrayList<>(subscriptions);
-        MarketSubscriptionRequest request = new MarketSubscriptionRequest(assetIds, "market");
+        MarketSubscriptionRequest request = new MarketSubscriptionRequest(assetIds, "market", true);
         String payload = GSON.toJson(request);
 
         log.info("Sending subscription for {} tokens.", assetIds.size());
@@ -131,32 +143,58 @@ public class PolyHandler implements BinanceUniHandler {
     @Override
     public void onMessage( String message )
     {
-
         try {
-            if (message.indexOf("@depth") >= 0)
-            { // Прилетело обновление стакана
-                try {
-                    // do smthng
-                } catch (Exception e)
-                {
-                    log.error("Couldn't parse " + message, e);
-                }
-            } else if (message.indexOf("@kline_") >= 0)
-            {
-                try {
-                    // do smthng
-                    //log.info( message );
-                } catch (Exception e)
-                {
-                    log.error("Couldn't parse " + message, e);
-                }
-            } else
-            {
+            JsonElement root = com.google.gson.JsonParser.parseString(message);
+            if (root == null || root.isJsonNull()) {
                 log.info("unknown message: " + message);
+                return;
             }
+
+            if (root.isJsonObject()) {
+                processEventObject(root.getAsJsonObject(), message);
+                return;
+            }
+
+            if (root.isJsonArray()) {
+                JsonArray events = root.getAsJsonArray();
+                for (JsonElement item : events) {
+                    if (item == null || !item.isJsonObject()) {
+                        log.info("Skip non-object websocket array item: {}", item);
+                        continue;
+                    }
+                    processEventObject(item.getAsJsonObject(), item.toString());
+                }
+                return;
+            }
+
+            log.info("unknown message type: " + message);
+        } catch (JsonParseException e) {
+            log.error("Couldn't parse websocket message: " + message, e);
         } catch (Exception e) {
             log.error("Couldn't map object from str: " + message, e);
         }
+    }
+
+    /** Обрабатывает одно websocket-сообщение в формате JSON-объекта. */
+    private void processEventObject(JsonObject eventObject, String rawMessage)
+    {
+        MarketEventEnvelope envelope = GSON.fromJson(eventObject, MarketEventEnvelope.class);
+        if (envelope == null || envelope.event_type == null) {
+            log.info("unknown message: " + rawMessage);
+            return;
+        }
+
+        if ("book".equals(envelope.event_type)) {
+            handleBookMessage(rawMessage);
+            return;
+        }
+
+        if ("price_change".equals(envelope.event_type)) {
+            handlePriceChangeMessage(rawMessage);
+            return;
+        }
+
+        // log.info("Skip unsupported event_type {}: {}", envelope.event_type, rawMessage);
     }
 
     @Override
@@ -176,17 +214,132 @@ public class PolyHandler implements BinanceUniHandler {
         log.error( "Yo-ho-ho", ex );
     }
 
+    /**  */
+    private void handleBookMessage(String message)
+    {
+        BookMessage bookMessage = GSON.fromJson(message, BookMessage.class);
+        if (bookMessage == null || bookMessage.asset_id == null) {
+            log.warn("Skip invalid book message: {}", message);
+            return;
+        }
+        if (stakanService == null) {
+            log.warn("StakanService is not registered yet, skip book event.");
+            return;
+        }
+
+        stakanService.handleBookEvent(
+                bookMessage.asset_id,
+                bookMessage.market,
+                toLevelUpdates(bookMessage.bids),
+                toLevelUpdates(bookMessage.asks),
+                bookMessage.hash,
+                bookMessage.timestamp
+        );
+    }
+
+    /**  */
+    private void handlePriceChangeMessage(String message)
+    {
+        PriceChangeMessage priceChangeMessage = GSON.fromJson(message, PriceChangeMessage.class);
+        if (priceChangeMessage == null || priceChangeMessage.price_changes == null || priceChangeMessage.price_changes.isEmpty()) {
+            log.warn("Skip invalid price_change message: {}", message);
+            return;
+        }
+        if (stakanService == null) {
+            log.warn("StakanService is not registered yet, skip price_change event.");
+            return;
+        }
+
+        for (PriceChangeEntry priceChange : priceChangeMessage.price_changes) {
+            if (priceChange == null || priceChange.asset_id == null || priceChange.side == null
+                    || priceChange.price == null || priceChange.size == null) {
+                log.warn("Skip broken price_change entry in message: {}", message);
+                continue;
+            }
+
+            stakanService.handlePriceChangeEvent(
+                    priceChange.asset_id,
+                    priceChangeMessage.market,
+                    priceChange.side,
+                    priceChange.price,
+                    priceChange.size,
+                    priceChange.hash,
+                    priceChangeMessage.timestamp
+            );
+        }
+    }
+
+    /**  */
+    private List<Book.LevelUpdate> toLevelUpdates(List<PriceLevel> levels)
+    {
+        List<Book.LevelUpdate> updates = new ArrayList<>();
+        if (levels == null || levels.isEmpty()) {
+            return updates;
+        }
+
+        for (PriceLevel level : levels) {
+            if (level == null || level.price == null || level.size == null) {
+                continue;
+            }
+            updates.add(new Book.LevelUpdate(level.price, level.size));
+        }
+        return updates;
+    }
+
     /** DTO для сообщения подписки на market channel в Polymarket. */
     private static class MarketSubscriptionRequest
     {
         private final List<String> assets_ids;
         private final String type;
+        private final boolean initial_dump;
 
-        private MarketSubscriptionRequest(List<String> assetsIds, String type)
+        private MarketSubscriptionRequest(List<String> assetsIds, String type, boolean initialDump)
         {
             this.assets_ids = assetsIds;
             this.type = type;
+            this.initial_dump = initialDump;
         }
+    }
+
+    private static class MarketEventEnvelope
+    {
+        private String event_type;
+    }
+
+    private static class BookMessage
+    {
+        private String market;
+        private String asset_id;
+        private List<PriceLevel> bids;
+        private List<PriceLevel> asks;
+        private String hash;
+        private String timestamp;
+        private String event_type;
+    }
+
+    private static class PriceChangeMessage
+    {
+        private String market;
+        private List<PriceChangeEntry> price_changes;
+        private String timestamp;
+        private String event_type;
+    }
+
+    private static class PriceChangeEntry
+    {
+        private String asset_id;
+        private String price;
+        private String size;
+        private String side;
+        private String hash;
+        private String best_bid;
+        private String best_ask;
+    }
+
+    private static class PriceLevel
+    {
+        private String price;
+        private String size;
     }
 
 }
